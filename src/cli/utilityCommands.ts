@@ -2,6 +2,7 @@ import { z } from "incur";
 
 import type { DirectAnalysis } from "../composition/directAnalysis.js";
 import type { ReferenceSourcePolicy } from "../domain/referenceSourcePolicy.js";
+import { createHistoricalSourceSummary } from "../domain/referenceSourceSummary.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { importReferenceSource } from "../application/ReferenceSourceImport.js";
@@ -241,11 +242,50 @@ const registerReferenceSourceCommand = (
         .string()
         .describe("Local source directory to import as historical reference"),
     }),
-    run: ({ args }) =>
+    options: z.object({
+      detail: z
+        .enum(["full", "summary"])
+        .default("full")
+        .describe(
+          "Complete committed graph or compact historical-source summary",
+        ),
+      outlineDepth: z
+        .number()
+        .int()
+        .safe()
+        // After .safe(): its safe-range check overwrites an earlier minimum,
+        // which advertised negative depths the parser rejects.
+        .nonnegative()
+        .optional()
+        .describe(
+          "Summary outline path depth (default: 2; 0 omits entries); requires --detail summary",
+        ),
+    }),
+    run: ({ args, options }) =>
       logCliCommand(
         logger,
         "import-reference-source",
         async () => {
+          if (
+            options.outlineDepth !== undefined &&
+            options.detail !== "summary"
+          )
+            return {
+              error: "Import failed",
+              ...projectAnalysisError(
+                new AnalysisInputError(
+                  "import-reference-source",
+                  { userMessage: "--outline-depth requires --detail summary" },
+                  [
+                    {
+                      path: ["outlineDepth"],
+                      reason: "invalid_value",
+                      message: "--outline-depth requires --detail summary",
+                    },
+                  ],
+                ),
+              ),
+            };
           const config = parseConfig(environment);
           if (!config.ok)
             return {
@@ -255,6 +295,9 @@ const registerReferenceSourceCommand = (
           return runReferenceSourceImport(
             args.root,
             config.value.referenceSourcePolicy,
+            options.detail === "summary"
+              ? (options.outlineDepth ?? 2)
+              : undefined,
           );
         },
         isReferenceSourceImportCliFailure,
@@ -265,6 +308,7 @@ const registerReferenceSourceCommand = (
 const runReferenceSourceImport = async (
   root: string,
   policy: ReferenceSourcePolicy,
+  outlineDepth: number | undefined,
 ): Promise<unknown> => {
   const resources = new ArtifactResourceScope();
   let outcome:
@@ -346,7 +390,9 @@ const runReferenceSourceImport = async (
         cause: closeOutcome.cause,
       }),
     };
-  return imported.value;
+  return outlineDepth === undefined
+    ? imported.value
+    : createHistoricalSourceSummary(imported.value, outlineDepth);
 };
 
 const mergeReferenceSourceCleanup = (
